@@ -30,17 +30,17 @@ done
 command -v tailscale >/dev/null || { echo "tailscale not found in PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq not found in PATH (brew install jq)" >&2; exit 1; }
 
-# ANSI helpers — muted palette inspired by Catppuccin / Tokyo Night
+# ANSI helpers — balanced palette inspired by One Dark / Gruvbox
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
-  C_GREEN=$'\033[38;5;108m'    # sage
-  C_RED=$'\033[38;5;174m'      # muted coral
-  C_YELLOW=$'\033[38;5;180m'   # warm sand
-  C_BLUE=$'\033[38;5;110m'     # steel blue
-  C_MAGENTA=$'\033[38;5;139m'  # mauve
-  C_CYAN=$'\033[38;5;109m'     # teal grey
-  C_GREY=$'\033[38;5;244m'     # warm grey
-  C_ORANGE=$'\033[38;5;173m'   # peach
+  C_GREEN=$'\033[38;5;114m'    # green
+  C_RED=$'\033[38;5;168m'      # rose
+  C_YELLOW=$'\033[38;5;179m'   # gold
+  C_BLUE=$'\033[38;5;111m'     # sapphire
+  C_MAGENTA=$'\033[38;5;141m'  # purple
+  C_CYAN=$'\033[38;5;80m'      # cyan
+  C_GREY=$'\033[38;5;245m'     # grey
+  C_ORANGE=$'\033[38;5;215m'   # peach
 else
   C_RESET=""; C_DIM=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_YELLOW=""
   C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_GREY=""; C_ORANGE=""
