@@ -5,8 +5,14 @@
 #   tsls -o           online only
 #   tsls -f           offline only
 #   tsls -w [sec]     watch mode (default 5s refresh)
+#   tsls -u           update to the latest release
+#   tsls -V           print version
 
 set -euo pipefail
+
+VERSION="0.2.0"
+REPO="cobanov/better-tailscale-ls"
+RAW_URL="https://raw.githubusercontent.com/${REPO}/main/tsls"
 
 ONLINE_ONLY=0
 OFFLINE_ONLY=0
@@ -21,11 +27,14 @@ while [[ $# -gt 0 ]]; do
       WATCH=1; shift
       if [[ ${1:-} =~ ^[0-9]+$ ]]; then WATCH_INTERVAL=$1; shift; fi
       ;;
+    -u|--update|--upgrade) ACTION=update; shift ;;
+    -V|--version) printf "tsls %s\n" "$VERSION"; exit 0 ;;
     -h|--help)
-      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
+ACTION="${ACTION:-}"
 
 command -v tailscale >/dev/null || { echo "tailscale not found in PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq not found in PATH (brew install jq)" >&2; exit 1; }
@@ -75,6 +84,60 @@ human_ago() {
   fi
 }
 
+resolve_self() {
+  # Follow symlinks to find the actual on-disk script path.
+  local p="$0"
+  while [[ -L "$p" ]]; do
+    local t
+    t=$(readlink "$p")
+    [[ "$t" = /* ]] && p="$t" || p="$(cd "$(dirname "$p")" && pwd)/$t"
+  done
+  printf "%s\n" "$p"
+}
+
+self_update() {
+  command -v curl >/dev/null || { echo "curl required for --update" >&2; exit 1; }
+  local self tmp remote
+  self=$(resolve_self)
+  tmp=$(mktemp)
+
+  printf "\n  %scurrent:%s %s\n" "$C_DIM" "$C_RESET" "$VERSION"
+  printf "  %sfetching:%s %s\n" "$C_DIM" "$C_RESET" "$RAW_URL"
+
+  if ! curl -fsSL "$RAW_URL" -o "$tmp"; then
+    rm -f "$tmp"
+    printf "  %s✗%s download failed\n" "$C_RED" "$C_RESET" >&2
+    exit 1
+  fi
+
+  remote=$(grep -m1 '^VERSION=' "$tmp" | sed -E 's/^VERSION="?([^"]+)"?.*/\1/')
+  if [[ -z "$remote" ]]; then
+    rm -f "$tmp"
+    printf "  %s✗%s could not parse remote version\n" "$C_RED" "$C_RESET" >&2
+    exit 1
+  fi
+
+  if [[ "$remote" == "$VERSION" ]]; then
+    rm -f "$tmp"
+    printf "  %s✓%s already on the latest version (%s)\n\n" "$C_GREEN" "$C_RESET" "$VERSION"
+    exit 0
+  fi
+
+  printf "  %s↑%s updating %s%s%s → %s%s%s\n" \
+    "$C_GREEN" "$C_RESET" \
+    "$C_DIM" "$VERSION" "$C_RESET" \
+    "$C_BOLD" "$remote" "$C_RESET"
+
+  if [[ -w "$self" ]]; then
+    install -m 0755 "$tmp" "$self"
+  else
+    printf "  %sneed sudo to write %s%s\n" "$C_DIM" "$self" "$C_RESET"
+    sudo install -m 0755 "$tmp" "$self"
+  fi
+  rm -f "$tmp"
+  printf "  %s✓%s installed v%s at %s\n\n" "$C_GREEN" "$C_RESET" "$remote" "$self"
+}
+
 render() {
   local json
   json=$(tailscale status --json 2>/dev/null)
@@ -109,11 +172,12 @@ render() {
   online=$(printf "%s\n" "$rows" | awk -F'\t' '$1=="1"' | wc -l | tr -d ' ')
   offline=$(( total - online ))
 
-  printf "\n  %s%sTailscale%s  %s%s%s  ·  %s%s online%s  %s%s offline%s\n" \
+  printf "\n  %s%sTailscale%s  %s%s%s  ·  %s%s online%s  %s%s offline%s   %sv%s%s\n" \
     "$C_BOLD" "$C_CYAN" "$C_RESET" \
     "$C_DIM" "$tailnet" "$C_RESET" \
     "$C_GREEN" "$online" "$C_RESET" \
-    "$C_GREY"  "$offline" "$C_RESET"
+    "$C_GREY"  "$offline" "$C_RESET" \
+    "$C_DIM" "$VERSION" "$C_RESET"
   printf "  %s%s%s\n" "$C_DIM" "$(printf '─%.0s' {1..62})" "$C_RESET"
 
   # Sort: online (1) first, then by hostname
@@ -157,7 +221,9 @@ render() {
   printf "\n"
 }
 
-if [[ "$WATCH" == 1 ]]; then
+if [[ "$ACTION" == "update" ]]; then
+  self_update
+elif [[ "$WATCH" == 1 ]]; then
   trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
   tput civis 2>/dev/null || true
   while true; do

@@ -52,8 +52,14 @@ tsls -o          # online only
 tsls -f          # offline only
 tsls -w          # watch mode, refreshes every 5s
 tsls -w 2        # custom refresh interval
+tsls -u          # self-update to the latest release
+tsls -V          # print version
 tsls --help
 ```
+
+The current version is shown dim in the header so you always know what
+you're running, and `tsls -u` pulls the newest `tsls` from `main` over
+itself (uses `sudo` if the install dir isn't user-writable).
 
 ### Badges
 
