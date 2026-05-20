@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.3"
+VERSION="0.2.4"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -195,9 +195,12 @@ render() {
     "$C_GREEN" "$online" "$C_RESET" \
     "$C_GREY"  "$offline" "$C_RESET" \
     "$C_DIM" "$VERSION" "$C_RESET"
+  # Match the actual table width: ip(15) + name(18) + os(8) + status
+  # column + a little slack for badges, capped at terminal width.
   local cols width
   cols=$(tput cols 2>/dev/null || echo 80)
   width=$(( cols - 4 ))
+  (( width > 68 )) && width=68
   (( width < 20 )) && width=20
   printf "  %s%s%s\n" "$C_DIM" "$(printf '─%.0s' $(seq 1 "$width"))" "$C_RESET"
 
