@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # tsls - colorful Tailscale device list
 # Usage:
-#   tsls              show all devices (online first)
+#   tsls              show your devices (Mullvad exit nodes hidden)
 #   tsls -o           online only
 #   tsls -f           offline only
+#   tsls -a           also show Mullvad / shared exit nodes
 #   tsls -w [sec]     watch mode (default 5s refresh)
 #   tsls -u           update to the latest release
 #   tsls -V           print version
 
 set -euo pipefail
 
-VERSION="0.2.4"
+VERSION="0.3.0"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
 OFFLINE_ONLY=0
+SHOW_ALL=0
 WATCH=0
 WATCH_INTERVAL=5
 
@@ -22,6 +24,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -o|--online)  ONLINE_ONLY=1; shift ;;
     -f|--offline) OFFLINE_ONLY=1; shift ;;
+    -a|--all)     SHOW_ALL=1; shift ;;
     -w|--watch)
       WATCH=1; shift
       if [[ ${1:-} =~ ^[0-9]+$ ]]; then WATCH_INTERVAL=$1; shift; fi
@@ -29,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     -u|--update|--upgrade) ACTION=update; shift ;;
     -V|--version) printf "tsls %s\n" "$VERSION"; exit 0 ;;
     -h|--help)
-      sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -162,39 +165,54 @@ render() {
   local tailnet
   tailnet=$(printf "%s" "$json" | jq -r '.MagicDNSSuffix // "tailnet"')
 
-  # Build rows: online_flag<TAB>name<TAB>ip<TAB>os<TAB>last_iso<TAB>tag
-  # "name" is the Tailscale machine name (DNSName before first dot, matches
-  # what the admin console shows). Falls back to HostName if DNSName is empty.
+  # Build rows separated by \x1f (Unit Separator, non-whitespace so bash
+  # `read` won't collapse empty fields the way it does with tabs).
+  # Columns: online<US>hidden<US>name<US>ip<US>os<US>last<US>tag
+  # `hidden` flags Mullvad-tagged exit nodes so we can suppress them by
+  # default without losing the row entirely. "name" is the Tailscale
+  # machine name (DNSName before first dot); falls back to HostName.
+  local US=$'\x1f'
   local rows
-  rows=$(printf "%s" "$json" | jq -r '
+  rows=$(printf "%s" "$json" | jq -r --arg us "$US" '
     [ .Self ] + ( .Peer // {} | to_entries | map(.value) )
     | .[]
     | ( (.DNSName // "") | split(".") | .[0] ) as $name
+    | ( (.Tags // []) | any(startswith("tag:mullvad")) ) as $is_mullvad
     | [
         (if .Online then "1" else "0" end),
+        (if $is_mullvad then "1" else "0" end),
         (if ($name // "") == "" then (.HostName // "?") else $name end),
         (.TailscaleIPs[0] // "-"),
-        (.OS // "?"),
+        (if (.OS // "") == "" then "-" else .OS end),
         (.LastSeen // "0001-01-01T00:00:00Z"),
         (if .ID == ($self // "") then "self"
          elif .ExitNode then "exit"
          elif .Active then "active"
          else "" end)
-      ] | @tsv
+      ] | join($us)
   ' --arg self "$(printf "%s" "$json" | jq -r '.Self.ID')")
 
-  # Header
-  local total online offline
+  # Counts (visible-only respect SHOW_ALL)
+  local total online offline hidden
   total=$(printf "%s\n" "$rows" | grep -c . || true)
-  online=$(printf "%s\n" "$rows" | awk -F'\t' '$1=="1"' | wc -l | tr -d ' ')
-  offline=$(( total - online ))
+  hidden=$(printf "%s\n" "$rows" | awk -F"$US" '$2=="1"' | wc -l | tr -d ' ')
+  if [[ "$SHOW_ALL" == 1 ]]; then
+    online=$(printf "%s\n" "$rows" | awk -F"$US" '$1=="1"' | wc -l | tr -d ' ')
+    offline=$(( total - online ))
+  else
+    online=$(printf "%s\n" "$rows"  | awk -F"$US" '$1=="1" && $2=="0"' | wc -l | tr -d ' ')
+    offline=$(printf "%s\n" "$rows" | awk -F"$US" '$1=="0" && $2=="0"' | wc -l | tr -d ' ')
+  fi
 
-  printf "\n  %s%sTailscale%s  %s%s%s  ·  %s%s online%s  %s%s offline%s   %sv%s%s\n" \
+  printf "\n  %s%sTailscale%s  %s%s%s  ·  %s%s online%s  %s%s offline%s" \
     "$C_BOLD" "$C_CYAN" "$C_RESET" \
     "$C_DIM" "$tailnet" "$C_RESET" \
     "$C_GREEN" "$online" "$C_RESET" \
-    "$C_GREY"  "$offline" "$C_RESET" \
-    "$C_DIM" "$VERSION" "$C_RESET"
+    "$C_GREY"  "$offline" "$C_RESET"
+  if [[ "$SHOW_ALL" != 1 && "$hidden" -gt 0 ]]; then
+    printf "  ·  %s%s mullvad hidden%s" "$C_DIM" "$hidden" "$C_RESET"
+  fi
+  printf "   %sv%s%s\n" "$C_DIM" "$VERSION" "$C_RESET"
   # Match the actual table width: ip(15) + name(18) + os(8) + status
   # column + a little slack for badges, capped at terminal width.
   local cols width
@@ -204,12 +222,13 @@ render() {
   (( width < 20 )) && width=20
   printf "  %s%s%s\n" "$C_DIM" "$(printf '─%.0s' $(seq 1 "$width"))" "$C_RESET"
 
-  # Sort: online (1) first, then by hostname
+  # Sort: online (1) first, then by name
   local sorted
-  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t$'\t' -k1,1r -k2,2)
+  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k3,3)
 
-  while IFS=$'\t' read -r is_online name ip os last tag; do
+  while IFS="$US" read -r is_online is_hidden name ip os last tag; do
     [[ -z "$name" ]] && continue
+    if [[ "$SHOW_ALL" != 1 && "$is_hidden" == "1" ]]; then continue; fi
     if [[ "$ONLINE_ONLY" == 1 && "$is_online" != "1" ]]; then continue; fi
     if [[ "$OFFLINE_ONLY" == 1 && "$is_online" != "0" ]]; then continue; fi
 

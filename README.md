@@ -47,9 +47,10 @@ brew install tailscale jq
 ## Usage
 
 ```bash
-tsls             # all devices, online first
+tsls             # your devices, online first (Mullvad exit nodes hidden)
 tsls -o          # online only
 tsls -f          # offline only
+tsls -a          # also include Mullvad / shared exit nodes
 tsls -w          # watch mode, refreshes every 5s
 tsls -w 2        # custom refresh interval
 tsls -u          # self-update to the latest release
@@ -57,8 +58,13 @@ tsls -V          # print version
 tsls --help
 ```
 
+If you're connected to Mullvad through Tailscale, the ~70 exit nodes
+(`us-sea-wg-001`, `de-fra-wg-302`, ...) would otherwise drown out your
+own devices. They're hidden by default and counted in the header
+(`78 mullvad hidden`); use `-a` / `--all` to see them.
+
 The current version is shown dim in the header so you always know what
-you're running, and `tsls -u` pulls the newest `tsls` from `main` over
+you're running, and `tsls -u` pulls the newest tagged release over
 itself (uses `sudo` if the install dir isn't user-writable).
 
 ### Badges
