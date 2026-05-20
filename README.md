@@ -3,16 +3,8 @@
 A nicer `tailscale status`. Colored, sorted, filterable, with online/offline
 counts and badges for `[self]`, `[active]`, and `[exit]` nodes.
 
-```
-  Tailscale  example.ts.net  ·  10 online  2 offline
-  ──────────────────────────────────────────────────────────────
-  ●  macbook-pro         100.77.28.109    macOS     online [self]
-  ●  nuc                 100.66.227.127   linux     online [active]
-  ●  phone               100.76.55.68     android   online
-  ●  ipad                100.82.173.21    iOS       online
-  ○  old-laptop          100.81.11.125    windows   1h ago
-  ○  nas                 100.73.7.15      linux     1d ago
-```
+
+![](https://pbs.twimg.com/media/HIyNgb-a8AA09iG?format=jpg&name=medium)
 
 ## Install
 
