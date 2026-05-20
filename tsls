@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# tsls - colorful Tailscale device list
+# Usage:
+#   tsls              show all devices (online first)
+#   tsls -o           online only
+#   tsls -f           offline only
+#   tsls -w [sec]     watch mode (default 5s refresh)
+
+set -euo pipefail
+
+ONLINE_ONLY=0
+OFFLINE_ONLY=0
+WATCH=0
+WATCH_INTERVAL=5
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|--online)  ONLINE_ONLY=1; shift ;;
+    -f|--offline) OFFLINE_ONLY=1; shift ;;
+    -w|--watch)
+      WATCH=1; shift
+      if [[ ${1:-} =~ ^[0-9]+$ ]]; then WATCH_INTERVAL=$1; shift; fi
+      ;;
+    -h|--help)
+      sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 1 ;;
+  esac
+done
+
+command -v tailscale >/dev/null || { echo "tailscale not found in PATH" >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq not found in PATH (brew install jq)" >&2; exit 1; }
+
+# ANSI helpers
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
+  C_GREEN=$'\033[38;5;46m'; C_RED=$'\033[38;5;203m'
+  C_YELLOW=$'\033[38;5;221m'; C_BLUE=$'\033[38;5;75m'
+  C_MAGENTA=$'\033[38;5;177m'; C_CYAN=$'\033[38;5;87m'
+  C_GREY=$'\033[38;5;243m'; C_ORANGE=$'\033[38;5;215m'
+else
+  C_RESET=""; C_DIM=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_YELLOW=""
+  C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_GREY=""; C_ORANGE=""
+fi
+
+os_color() {
+  case "$1" in
+    macOS|iOS)        printf "%s" "$C_CYAN" ;;
+    linux)            printf "%s" "$C_YELLOW" ;;
+    windows)          printf "%s" "$C_BLUE" ;;
+    android)          printf "%s" "$C_GREEN" ;;
+    tvOS|FreeBSD|*)   printf "%s" "$C_MAGENTA" ;;
+  esac
+}
+
+human_ago() {
+  # input: ISO timestamp or 0001-01-01T...; output: "5m", "3h", "2d"
+  local ts="$1"
+  [[ "$ts" == 0001-01-01* || -z "$ts" ]] && { printf "now"; return; }
+  local now epoch diff
+  now=$(date +%s)
+  # macOS date can't parse fractional ISO directly; strip fraction & Z
+  local clean="${ts%%.*}"
+  clean="${clean%Z}"
+  epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean" +%s 2>/dev/null || echo "$now")
+  diff=$(( now - epoch ))
+  if   (( diff < 60 ));     then printf "%ds" "$diff"
+  elif (( diff < 3600 ));   then printf "%dm" $((diff/60))
+  elif (( diff < 86400 ));  then printf "%dh" $((diff/3600))
+  elif (( diff < 2592000 ));then printf "%dd" $((diff/86400))
+  else printf "%dmo" $((diff/2592000))
+  fi
+}
+
+render() {
+  local json
+  json=$(tailscale status --json 2>/dev/null)
+
+  local tailnet
+  tailnet=$(printf "%s" "$json" | jq -r '.MagicDNSSuffix // "tailnet"')
+
+  # Build rows: online_flag<TAB>host<TAB>ip<TAB>os<TAB>last_iso<TAB>tag
+  local rows
+  rows=$(printf "%s" "$json" | jq -r '
+    [ .Self ] + ( .Peer // {} | to_entries | map(.value) )
+    | .[]
+    | [
+        (if .Online then "1" else "0" end),
+        (.HostName // "?"),
+        (.TailscaleIPs[0] // "-"),
+        (.OS // "?"),
+        (.LastSeen // "0001-01-01T00:00:00Z"),
+        (if .ID == ($self // "") then "self"
+         elif .ExitNode then "exit"
+         elif .Active then "active"
+         else "" end)
+      ] | @tsv
+  ' --arg self "$(printf "%s" "$json" | jq -r '.Self.ID')")
+
+  # Header
+  local total online offline
+  total=$(printf "%s\n" "$rows" | grep -c . || true)
+  online=$(printf "%s\n" "$rows" | awk -F'\t' '$1=="1"' | wc -l | tr -d ' ')
+  offline=$(( total - online ))
+
+  printf "\n  %s%sTailscale%s  %s%s%s  ·  %s%s online%s  %s%s offline%s\n" \
+    "$C_BOLD" "$C_CYAN" "$C_RESET" \
+    "$C_DIM" "$tailnet" "$C_RESET" \
+    "$C_GREEN" "$online" "$C_RESET" \
+    "$C_GREY"  "$offline" "$C_RESET"
+  printf "  %s%s%s\n" "$C_DIM" "$(printf '─%.0s' {1..62})" "$C_RESET"
+
+  # Sort: online (1) first, then by hostname
+  local sorted
+  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t$'\t' -k1,1r -k2,2)
+
+  while IFS=$'\t' read -r is_online host ip os last tag; do
+    [[ -z "$host" ]] && continue
+    if [[ "$ONLINE_ONLY" == 1 && "$is_online" != "1" ]]; then continue; fi
+    if [[ "$OFFLINE_ONLY" == 1 && "$is_online" != "0" ]]; then continue; fi
+
+    local dot status_col status_txt
+    if [[ "$is_online" == "1" ]]; then
+      dot="${C_GREEN}●${C_RESET}"
+      status_col="$C_GREEN"; status_txt="online"
+    else
+      dot="${C_GREY}○${C_RESET}"
+      status_col="$C_GREY"; status_txt="$(human_ago "$last") ago"
+    fi
+
+    local osc
+    osc=$(os_color "$os")
+
+    local badge=""
+    case "$tag" in
+      self)   badge=" ${C_DIM}[self]${C_RESET}" ;;
+      exit)   badge=" ${C_ORANGE}[exit]${C_RESET}" ;;
+      active) badge=" ${C_GREEN}[active]${C_RESET}" ;;
+    esac
+
+    # 18-char host, 16-char ip, 8-char os, status
+    printf "  %s  %s%-18s%s  %s%-15s%s  %s%-8s%s  %s%s%s%s\n" \
+      "$dot" \
+      "$C_BOLD" "$host" "$C_RESET" \
+      "$C_DIM"  "$ip"   "$C_RESET" \
+      "$osc"    "$os"   "$C_RESET" \
+      "$status_col" "$status_txt" "$C_RESET" \
+      "$badge"
+  done <<< "$sorted"
+
+  printf "\n"
+}
+
+if [[ "$WATCH" == 1 ]]; then
+  trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+  tput civis 2>/dev/null || true
+  while true; do
+    clear
+    render
+    printf "  %srefreshing every %ss · ctrl-c to quit%s\n" "$C_DIM" "$WATCH_INTERVAL" "$C_RESET"
+    sleep "$WATCH_INTERVAL"
+  done
+else
+  render
+fi
