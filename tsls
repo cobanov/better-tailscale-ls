@@ -30,13 +30,17 @@ done
 command -v tailscale >/dev/null || { echo "tailscale not found in PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq not found in PATH (brew install jq)" >&2; exit 1; }
 
-# ANSI helpers
+# ANSI helpers — muted palette inspired by Catppuccin / Tokyo Night
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
-  C_GREEN=$'\033[38;5;46m'; C_RED=$'\033[38;5;203m'
-  C_YELLOW=$'\033[38;5;221m'; C_BLUE=$'\033[38;5;75m'
-  C_MAGENTA=$'\033[38;5;177m'; C_CYAN=$'\033[38;5;87m'
-  C_GREY=$'\033[38;5;243m'; C_ORANGE=$'\033[38;5;215m'
+  C_GREEN=$'\033[38;5;108m'    # sage
+  C_RED=$'\033[38;5;174m'      # muted coral
+  C_YELLOW=$'\033[38;5;180m'   # warm sand
+  C_BLUE=$'\033[38;5;110m'     # steel blue
+  C_MAGENTA=$'\033[38;5;139m'  # mauve
+  C_CYAN=$'\033[38;5;109m'     # teal grey
+  C_GREY=$'\033[38;5;244m'     # warm grey
+  C_ORANGE=$'\033[38;5;173m'   # peach
 else
   C_RESET=""; C_DIM=""; C_BOLD=""; C_GREEN=""; C_RED=""; C_YELLOW=""
   C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_GREY=""; C_ORANGE=""
@@ -140,11 +144,11 @@ render() {
       active) badge=" ${C_GREEN}[active]${C_RESET}" ;;
     esac
 
-    # 18-char name, 16-char ip, 8-char os, status
-    printf "  %s  %s%-18s%s  %s%-15s%s  %s%-8s%s  %s%s%s%s\n" \
+    # 15-char ip, 18-char name, 8-char os, status
+    printf "  %s  %s%-15s%s  %s%-18s%s  %s%-8s%s  %s%s%s%s\n" \
       "$dot" \
-      "$C_BOLD" "$name" "$C_RESET" \
       "$C_DIM"  "$ip"   "$C_RESET" \
+      "$C_BOLD" "$name" "$C_RESET" \
       "$osc"    "$os"   "$C_RESET" \
       "$status_col" "$status_txt" "$C_RESET" \
       "$badge"
