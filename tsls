@@ -10,9 +10,8 @@
 
 set -euo pipefail
 
-VERSION="0.2.1"
+VERSION="0.2.2"
 REPO="cobanov/better-tailscale-ls"
-RAW_URL="https://raw.githubusercontent.com/${REPO}/main/tsls"
 
 ONLINE_ONLY=0
 OFFLINE_ONLY=0
@@ -97,31 +96,33 @@ resolve_self() {
 
 self_update() {
   command -v curl >/dev/null || { echo "curl required for --update" >&2; exit 1; }
-  local self tmp remote
+  local self tmp tag remote dl_url
   self=$(resolve_self)
   tmp=$(mktemp)
 
   printf "\n  %scurrent:%s %s\n" "$C_DIM" "$C_RESET" "$VERSION"
-  printf "  %sfetching:%s %s\n" "$C_DIM" "$C_RESET" "$RAW_URL"
+  printf "  %schecking:%s github.com/%s releases\n" "$C_DIM" "$C_RESET" "$REPO"
 
-  # Cache-bust the GitHub raw CDN so we always see the freshest main
-  local fetch_url="${RAW_URL}?ts=$(date +%s)"
-  if ! curl -fsSL -H 'Cache-Control: no-cache' "$fetch_url" -o "$tmp"; then
+  # Resolve the latest release tag via the GitHub API. Release/tag URLs
+  # are immutable, so raw.githubusercontent.com always serves them fresh
+  # (unlike branch-based URLs, which the CDN caches aggressively).
+  tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+        | grep -m1 '"tag_name":' \
+        | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')
+
+  if [[ -z "$tag" ]]; then
     rm -f "$tmp"
-    printf "  %s✗%s download failed\n" "$C_RED" "$C_RESET" >&2
+    printf "  %s✗%s could not determine latest release (no releases yet?)\n" \
+      "$C_RED" "$C_RESET" >&2
     exit 1
   fi
 
-  remote=$(grep -m1 '^VERSION=' "$tmp" | sed -E 's/^VERSION="?([^"]+)"?.*/\1/')
-  if [[ -z "$remote" ]]; then
-    rm -f "$tmp"
-    printf "  %s✗%s could not parse remote version\n" "$C_RED" "$C_RESET" >&2
-    exit 1
-  fi
+  remote="${tag#v}"
 
   if [[ "$remote" == "$VERSION" ]]; then
     rm -f "$tmp"
-    printf "  %s✓%s already on the latest version (%s)\n\n" "$C_GREEN" "$C_RESET" "$VERSION"
+    printf "  %s✓%s already on the latest version (%s)\n\n" \
+      "$C_GREEN" "$C_RESET" "$VERSION"
     exit 0
   fi
 
@@ -129,6 +130,20 @@ self_update() {
     "$C_GREEN" "$C_RESET" \
     "$C_DIM" "$VERSION" "$C_RESET" \
     "$C_BOLD" "$remote" "$C_RESET"
+
+  dl_url="https://raw.githubusercontent.com/${REPO}/${tag}/tsls"
+  if ! curl -fsSL "$dl_url" -o "$tmp"; then
+    rm -f "$tmp"
+    printf "  %s✗%s download failed: %s\n" "$C_RED" "$C_RESET" "$dl_url" >&2
+    exit 1
+  fi
+
+  # Sanity check: the downloaded file should at least look like our script
+  if ! head -1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
+    rm -f "$tmp"
+    printf "  %s✗%s downloaded file looks corrupted\n" "$C_RED" "$C_RESET" >&2
+    exit 1
+  fi
 
   if [[ -w "$self" ]]; then
     install -m 0755 "$tmp" "$self"
