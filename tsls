@@ -78,14 +78,17 @@ render() {
   local tailnet
   tailnet=$(printf "%s" "$json" | jq -r '.MagicDNSSuffix // "tailnet"')
 
-  # Build rows: online_flag<TAB>host<TAB>ip<TAB>os<TAB>last_iso<TAB>tag
+  # Build rows: online_flag<TAB>name<TAB>ip<TAB>os<TAB>last_iso<TAB>tag
+  # "name" is the Tailscale machine name (DNSName before first dot, matches
+  # what the admin console shows). Falls back to HostName if DNSName is empty.
   local rows
   rows=$(printf "%s" "$json" | jq -r '
     [ .Self ] + ( .Peer // {} | to_entries | map(.value) )
     | .[]
+    | ( (.DNSName // "") | split(".") | .[0] ) as $name
     | [
         (if .Online then "1" else "0" end),
-        (.HostName // "?"),
+        (if ($name // "") == "" then (.HostName // "?") else $name end),
         (.TailscaleIPs[0] // "-"),
         (.OS // "?"),
         (.LastSeen // "0001-01-01T00:00:00Z"),
@@ -113,8 +116,8 @@ render() {
   local sorted
   sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t$'\t' -k1,1r -k2,2)
 
-  while IFS=$'\t' read -r is_online host ip os last tag; do
-    [[ -z "$host" ]] && continue
+  while IFS=$'\t' read -r is_online name ip os last tag; do
+    [[ -z "$name" ]] && continue
     if [[ "$ONLINE_ONLY" == 1 && "$is_online" != "1" ]]; then continue; fi
     if [[ "$OFFLINE_ONLY" == 1 && "$is_online" != "0" ]]; then continue; fi
 
@@ -137,10 +140,10 @@ render() {
       active) badge=" ${C_GREEN}[active]${C_RESET}" ;;
     esac
 
-    # 18-char host, 16-char ip, 8-char os, status
+    # 18-char name, 16-char ip, 8-char os, status
     printf "  %s  %s%-18s%s  %s%-15s%s  %s%-8s%s  %s%s%s%s\n" \
       "$dot" \
-      "$C_BOLD" "$host" "$C_RESET" \
+      "$C_BOLD" "$name" "$C_RESET" \
       "$C_DIM"  "$ip"   "$C_RESET" \
       "$osc"    "$os"   "$C_RESET" \
       "$status_col" "$status_txt" "$C_RESET" \
