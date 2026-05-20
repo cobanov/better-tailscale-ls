@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-VERSION="0.2.0"
+VERSION="0.2.1"
 REPO="cobanov/better-tailscale-ls"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/main/tsls"
 
@@ -104,7 +104,9 @@ self_update() {
   printf "\n  %scurrent:%s %s\n" "$C_DIM" "$C_RESET" "$VERSION"
   printf "  %sfetching:%s %s\n" "$C_DIM" "$C_RESET" "$RAW_URL"
 
-  if ! curl -fsSL "$RAW_URL" -o "$tmp"; then
+  # Cache-bust the GitHub raw CDN so we always see the freshest main
+  local fetch_url="${RAW_URL}?ts=$(date +%s)"
+  if ! curl -fsSL -H 'Cache-Control: no-cache' "$fetch_url" -o "$tmp"; then
     rm -f "$tmp"
     printf "  %s✗%s download failed\n" "$C_RED" "$C_RESET" >&2
     exit 1
