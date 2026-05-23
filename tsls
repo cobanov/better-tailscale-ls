@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.0"
+VERSION="0.3.1"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -167,10 +167,11 @@ render() {
 
   # Build rows separated by \x1f (Unit Separator, non-whitespace so bash
   # `read` won't collapse empty fields the way it does with tabs).
-  # Columns: online<US>hidden<US>name<US>ip<US>os<US>last<US>tag
+  # Columns: online<US>hidden<US>name<US>ip<US>os<US>last<US>tag<US>caps
   # `hidden` flags Mullvad-tagged exit nodes so we can suppress them by
   # default without losing the row entirely. "name" is the Tailscale
   # machine name (DNSName before first dot); falls back to HostName.
+  # `caps` is a comma-separated list of capability flags: exit-opt, subnets.
   local US=$'\x1f'
   local rows
   rows=$(printf "%s" "$json" | jq -r --arg us "$US" '
@@ -178,6 +179,7 @@ render() {
     | .[]
     | ( (.DNSName // "") | split(".") | .[0] ) as $name
     | ( (.Tags // []) | any(startswith("tag:mullvad")) ) as $is_mullvad
+    | ( .ID == ($self // "") ) as $is_self
     | [
         (if .Online then "1" else "0" end),
         (if $is_mullvad then "1" else "0" end),
@@ -185,10 +187,14 @@ render() {
         (.TailscaleIPs[0] // "-"),
         (if (.OS // "") == "" then "-" else .OS end),
         (.LastSeen // "0001-01-01T00:00:00Z"),
-        (if .ID == ($self // "") then "self"
+        (if $is_self then "self"
          elif .ExitNode then "exit"
          elif .Active then "active"
-         else "" end)
+         else "" end),
+        ([
+          (if (.ExitNodeOption // false) and (.ExitNode // false | not) then "exit-opt" else empty end),
+          (if ((.PrimaryRoutes // []) | length) > 0 then "subnets" else empty end)
+        ] | join(","))
       ] | join($us)
   ' --arg self "$(printf "%s" "$json" | jq -r '.Self.ID')")
 
@@ -226,7 +232,7 @@ render() {
   local sorted
   sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k3,3)
 
-  while IFS="$US" read -r is_online is_hidden name ip os last tag; do
+  while IFS="$US" read -r is_online is_hidden name ip os last tag caps; do
     [[ -z "$name" ]] && continue
     if [[ "$SHOW_ALL" != 1 && "$is_hidden" == "1" ]]; then continue; fi
     if [[ "$ONLINE_ONLY" == 1 && "$is_online" != "1" ]]; then continue; fi
@@ -250,6 +256,16 @@ render() {
       exit)   badge=" ${C_ORANGE}[exit]${C_RESET}" ;;
       active) badge=" ${C_GREEN}[active]${C_RESET}" ;;
     esac
+    if [[ -n "$caps" ]]; then
+      local cap
+      while IFS= read -r cap; do
+        [[ -z "$cap" ]] && continue
+        case "$cap" in
+          exit-opt) badge+=" ${C_DIM}[exit?]${C_RESET}" ;;
+          subnets)  badge+=" ${C_BLUE}[subnets]${C_RESET}" ;;
+        esac
+      done < <(printf "%s\n" "$caps" | tr ',' '\n')
+    fi
 
     # 15-char ip, 18-char name, 8-char os, status
     printf "  %s  %s%-15s%s  %s%-18s%s  %s%-8s%s  %s%s%s%s\n" \
