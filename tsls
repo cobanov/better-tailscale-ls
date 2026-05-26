@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # tsls - colorful Tailscale device list
 # Usage:
-#   tsls              show your devices (Mullvad exit nodes hidden)
+#   tsls              show your devices (Mullvad + shared-in nodes hidden)
 #   tsls -o           online only
 #   tsls -f           offline only
-#   tsls -a           also show Mullvad / shared exit nodes
+#   tsls -a           also show Mullvad exit nodes and shared-in (sharee) nodes
 #   tsls -w [sec]     watch mode (default 5s refresh)
 #   tsls -u           update to the latest release
 #   tsls -V           print version
 
 set -euo pipefail
 
-VERSION="0.3.1"
+VERSION="0.3.2"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -168,8 +168,10 @@ render() {
   # Build rows separated by \x1f (Unit Separator, non-whitespace so bash
   # `read` won't collapse empty fields the way it does with tabs).
   # Columns: online<US>hidden<US>name<US>ip<US>os<US>last<US>tag<US>caps
-  # `hidden` flags Mullvad-tagged exit nodes so we can suppress them by
-  # default without losing the row entirely. "name" is the Tailscale
+  # `hidden` flags noise we suppress by default without dropping the row:
+  # Mullvad-tagged exit nodes and ShareeNode entries (devices owned by
+  # users we've shared a node *to* — Tailscale masks these behind the
+  # placeholder hostname "device-of-shared-to-user"). "name" is the Tailscale
   # machine name (DNSName before first dot); falls back to HostName.
   # `caps` is a comma-separated list of capability flags: exit-opt, subnets.
   local US=$'\x1f'
@@ -179,10 +181,11 @@ render() {
     | .[]
     | ( (.DNSName // "") | split(".") | .[0] ) as $name
     | ( (.Tags // []) | any(startswith("tag:mullvad")) ) as $is_mullvad
+    | ( .ShareeNode // false ) as $is_sharee
     | ( .ID == ($self // "") ) as $is_self
     | [
         (if .Online then "1" else "0" end),
-        (if $is_mullvad then "1" else "0" end),
+        (if ($is_mullvad or $is_sharee) then "1" else "0" end),
         (if ($name // "") == "" then (.HostName // "?") else $name end),
         (.TailscaleIPs[0] // "-"),
         (if (.OS // "") == "" then "-" else .OS end),
@@ -216,7 +219,7 @@ render() {
     "$C_GREEN" "$online" "$C_RESET" \
     "$C_GREY"  "$offline" "$C_RESET"
   if [[ "$SHOW_ALL" != 1 && "$hidden" -gt 0 ]]; then
-    printf "  ·  %s%s mullvad hidden%s" "$C_DIM" "$hidden" "$C_RESET"
+    printf "  ·  %s%s hidden%s" "$C_DIM" "$hidden" "$C_RESET"
   fi
   printf "   %sv%s%s\n" "$C_DIM" "$VERSION" "$C_RESET"
   # Match the actual table width: ip(15) + name(18) + os(8) + status
