@@ -53,7 +53,7 @@ else
   say "need sudo to write to $TARGET_DIR"
   sudo install -m 0755 "$TMP" "$TARGET"
 fi
-ok "installed tsls $(${TARGET} --help 2>/dev/null | head -1 || echo '')"
+ok "installed $("$TARGET" -V 2>/dev/null || echo tsls)"
 
 # warn if not on PATH
 case ":$PATH:" in

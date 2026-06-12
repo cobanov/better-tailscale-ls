@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.3"
+VERSION="0.4.0"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -27,7 +27,7 @@ while [[ $# -gt 0 ]]; do
     -a|--all)     SHOW_ALL=1; shift ;;
     -w|--watch)
       WATCH=1; shift
-      if [[ ${1:-} =~ ^[0-9]+$ ]]; then WATCH_INTERVAL=$1; shift; fi
+      if [[ ${1:-} =~ ^[1-9][0-9]*$ ]]; then WATCH_INTERVAL=$1; shift; fi
       ;;
     -u|--update|--upgrade) ACTION=update; shift ;;
     -V|--version) printf "tsls %s\n" "$VERSION"; exit 0 ;;
@@ -71,13 +71,26 @@ human_ago() {
   # input: ISO timestamp or 0001-01-01T...; output: "5m", "3h", "2d"
   local ts="$1"
   [[ "$ts" == 0001-01-01* || -z "$ts" ]] && { printf "now"; return; }
-  local now epoch diff
+  local now epoch diff off=0
   now=$(date +%s)
-  # macOS date can't parse fractional ISO directly; strip fraction & Z
-  local clean="${ts%%.*}"
-  clean="${clean%Z}"
-  epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean" +%s 2>/dev/null || echo "$now")
-  diff=$(( now - epoch ))
+  # Timestamps may carry a zone offset ("2026-06-12T15:11:05.2-07:00");
+  # parsing those as UTC would skew the result by hours, so capture the
+  # offset first and apply it to the epoch afterwards.
+  case "$ts" in
+    *[+-][0-9][0-9]:[0-9][0-9])
+      local zone="${ts: -6}"
+      off=$(( 10#${zone:1:2} * 3600 + 10#${zone:4:2} * 60 ))
+      [[ "${zone:0:1}" == "-" ]] && off=$(( -off ))
+      ;;
+  esac
+  # Bare "YYYY-MM-DDTHH:MM:SS" prefix; drops fraction, Z, and offset.
+  local clean="${ts:0:19}"
+  # BSD date (macOS) first, GNU date (Linux) as fallback.
+  epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean" +%s 2>/dev/null \
+       || date -u -d "$clean" +%s 2>/dev/null \
+       || echo "$now")
+  diff=$(( now - (epoch - off) ))
+  (( diff < 0 )) && diff=0
   if   (( diff < 60 ));     then printf "%ds" "$diff"
   elif (( diff < 3600 ));   then printf "%dm" $((diff/60))
   elif (( diff < 86400 ));  then printf "%dh" $((diff/3600))
@@ -102,6 +115,10 @@ self_update() {
   local self tmp tag remote dl_url
   self=$(resolve_self)
   tmp=$(mktemp)
+  # Covers every exit path, including an aborted sudo prompt. Expand
+  # $tmp now: it is a local and out of scope when the trap fires.
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" EXIT
 
   printf "\n  %scurrent:%s %s\n" "$C_DIM" "$C_RESET" "$VERSION"
   printf "  %schecking:%s github.com/%s releases\n" "$C_DIM" "$C_RESET" "$REPO"
@@ -109,12 +126,13 @@ self_update() {
   # Resolve the latest release tag via the GitHub API. Release/tag URLs
   # are immutable, so raw.githubusercontent.com always serves them fresh
   # (unlike branch-based URLs, which the CDN caches aggressively).
+  # `|| true` keeps a no-match grep from tripping errexit before the
+  # empty-tag check below can print its message.
   tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep -m1 '"tag_name":' \
-        | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/')
+        | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/' || true)
 
   if [[ -z "$tag" ]]; then
-    rm -f "$tmp"
     printf "  %s✗%s could not determine latest release (no releases yet?)\n" \
       "$C_RED" "$C_RESET" >&2
     exit 1
@@ -123,7 +141,6 @@ self_update() {
   remote="${tag#v}"
 
   if [[ "$remote" == "$VERSION" ]]; then
-    rm -f "$tmp"
     printf "  %s✓%s already on the latest version (%s)\n\n" \
       "$C_GREEN" "$C_RESET" "$VERSION"
     exit 0
@@ -136,14 +153,12 @@ self_update() {
 
   dl_url="https://raw.githubusercontent.com/${REPO}/${tag}/tsls"
   if ! curl -fsSL "$dl_url" -o "$tmp"; then
-    rm -f "$tmp"
     printf "  %s✗%s download failed: %s\n" "$C_RED" "$C_RESET" "$dl_url" >&2
     exit 1
   fi
 
   # Sanity check: the downloaded file should at least look like our script
   if ! head -1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
-    rm -f "$tmp"
     printf "  %s✗%s downloaded file looks corrupted\n" "$C_RED" "$C_RESET" >&2
     exit 1
   fi
@@ -154,13 +169,24 @@ self_update() {
     printf "  %sneed sudo to write %s%s\n" "$C_DIM" "$self" "$C_RESET"
     sudo install -m 0755 "$tmp" "$self"
   fi
-  rm -f "$tmp"
   printf "  %s✓%s installed v%s at %s\n\n" "$C_GREEN" "$C_RESET" "$remote" "$self"
 }
 
 render() {
   local json
-  json=$(tailscale status --json 2>/dev/null)
+  if ! json=$(tailscale status --json 2>/dev/null) || [[ -z "$json" ]]; then
+    printf "  %s✗%s cannot reach tailscaled (is Tailscale running?)\n" \
+      "$C_RED" "$C_RESET" >&2
+    return 1
+  fi
+
+  local backend
+  backend=$(printf "%s" "$json" | jq -r '.BackendState // "Unknown"' 2>/dev/null || echo Unknown)
+  if [[ "$backend" != "Running" && "$backend" != "Starting" ]]; then
+    printf "  %s✗%s tailscale backend is %s (try: tailscale up)\n" \
+      "$C_RED" "$C_RESET" "$backend" >&2
+    return 1
+  fi
 
   local tailnet
   tailnet=$(printf "%s" "$json" | jq -r '.MagicDNSSuffix // "tailnet"')
@@ -179,12 +205,13 @@ render() {
   local US=$'\x1f'
   local rows
   rows=$(printf "%s" "$json" | jq -r --arg us "$US" '
-    [ .Self ] + ( .Peer // {} | to_entries | map(.value) )
+    (.Self.ID // "") as $self
+    | [ .Self ] + ( .Peer // {} | to_entries | map(.value) )
     | .[]
     | ( (.DNSName // "") | split(".") | .[0] ) as $name
     | ( (.Tags // []) | any(startswith("tag:mullvad")) ) as $is_mullvad
     | ( .ShareeNode // false ) as $is_sharee
-    | ( .ID == ($self // "") ) as $is_self
+    | ( .ID == $self ) as $is_self
     | ( .Expired // false ) as $expired
     | [
         (if .Online and ($expired | not) then "1" else "0" end),
@@ -203,7 +230,7 @@ render() {
         ] | join(",")),
         (if $expired then "1" else "0" end)
       ] | join($us)
-  ' --arg self "$(printf "%s" "$json" | jq -r '.Self.ID')")
+  ')
 
   # Counts (visible-only respect SHOW_ALL)
   local total online offline hidden
@@ -237,7 +264,7 @@ render() {
 
   # Sort: online (1) first, then by name
   local sorted
-  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k3,3)
+  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k3,3f)
 
   while IFS="$US" read -r is_online is_hidden name ip os last tag caps is_expired; do
     [[ -z "$name" ]] && continue
@@ -254,7 +281,12 @@ render() {
       status_col="$C_RED"; status_txt="expired"
     else
       dot="${C_GREY}○${C_RESET}"
-      status_col="$C_GREY"; status_txt="$(human_ago "$last") ago"
+      status_col="$C_GREY"
+      if [[ "$last" == 0001-01-01* ]]; then
+        status_txt="offline"
+      else
+        status_txt="$(human_ago "$last") ago"
+      fi
     fi
 
     local osc
@@ -293,11 +325,15 @@ render() {
 if [[ "$ACTION" == "update" ]]; then
   self_update
 elif [[ "$WATCH" == 1 ]]; then
-  trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+  # EXIT trap restores the cursor on every exit path, not just ctrl-c.
+  trap 'tput cnorm 2>/dev/null' EXIT
+  trap 'exit 0' INT TERM
   tput civis 2>/dev/null || true
   while true; do
     clear
-    render
+    # A transient failure (tailscaled restarting) shows its message and
+    # the next refresh retries instead of killing the watch.
+    render || true
     printf "  %srefreshing every %ss · ctrl-c to quit%s\n" "$C_DIM" "$WATCH_INTERVAL" "$C_RESET"
     sleep "$WATCH_INTERVAL"
   done
