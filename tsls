@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.4.0"
+VERSION="0.4.1"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -222,7 +222,9 @@ render() {
         (.LastSeen // "0001-01-01T00:00:00Z"),
         (if $is_self then "self"
          elif .ExitNode then "exit"
-         elif .Active then "active"
+         # Engine sessions linger after a peer dies abruptly, so an
+         # offline row claiming [active] is just a stale link entry.
+         elif .Active and .Online and ($expired | not) then "active"
          else "" end),
         ([
           (if (.ExitNodeOption // false) and (.ExitNode // false | not) then "exit-opt" else empty end),
@@ -253,18 +255,37 @@ render() {
     printf "  ·  %s%s hidden%s" "$C_DIM" "$hidden" "$C_RESET"
   fi
   printf "   %sv%s%s\n" "$C_DIM" "$VERSION" "$C_RESET"
-  # Match the actual table width: ip(15) + name(18) + os(8) + status
-  # column + a little slack for badges, capped at terminal width.
+
+  # Column widths adapt to the rows that will actually print, so short
+  # names do not leave a wall of padding behind them. Same filters as
+  # the render loop below.
+  local ipw namew osw
+  read -r ipw namew osw <<< "$(printf "%s\n" "$rows" | awk -F"$US" \
+    -v all="$SHOW_ALL" -v on="$ONLINE_ONLY" -v off="$OFFLINE_ONLY" '
+    $3 == "" { next }
+    all != 1 && $2 == "1" { next }
+    on  == 1 && $1 != "1" { next }
+    off == 1 && $1 != "0" { next }
+    {
+      if (length($4) > i) i = length($4)
+      if (length($3) > n) n = length($3)
+      if (length($5) > o) o = length($5)
+    }
+    END { printf "%d %d %d", i, n, o }')"
+
+  # Separator matches the measured table width: dot + gaps + columns
+  # plus a little slack for the status text, capped at terminal width.
   local cols width
   cols=$(tput cols 2>/dev/null || echo 80)
-  width=$(( cols - 4 ))
-  (( width > 68 )) && width=68
+  width=$(( ipw + namew + osw + 19 ))
+  (( width > cols - 4 )) && width=$(( cols - 4 ))
   (( width < 20 )) && width=20
   printf "  %s%s%s\n" "$C_DIM" "$(printf '─%.0s' $(seq 1 "$width"))" "$C_RESET"
 
-  # Sort: online (1) first, then by name
+  # Sort: online (1) first, then OS so device types group together,
+  # then by name within each group.
   local sorted
-  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k3,3f)
+  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k5,5f -k3,3f)
 
   while IFS="$US" read -r is_online is_hidden name ip os last tag caps is_expired; do
     [[ -z "$name" ]] && continue
@@ -309,12 +330,12 @@ render() {
       done < <(printf "%s\n" "$caps" | tr ',' '\n')
     fi
 
-    # 15-char ip, 18-char name, 8-char os, status
-    printf "  %s  %s%-15s%s  %s%-18s%s  %s%-8s%s  %s%s%s%s\n" \
+    # Measured-width ip, name, os columns, then status and badges.
+    printf "  %s  %s%-*s%s  %s%-*s%s  %s%-*s%s  %s%s%s%s\n" \
       "$dot" \
-      "$C_DIM"  "$ip"   "$C_RESET" \
-      "$C_BOLD" "$name" "$C_RESET" \
-      "$osc"    "$os"   "$C_RESET" \
+      "$C_DIM"  "$ipw"   "$ip"   "$C_RESET" \
+      "$C_BOLD" "$namew" "$name" "$C_RESET" \
+      "$osc"    "$osw"   "$os"   "$C_RESET" \
       "$status_col" "$status_txt" "$C_RESET" \
       "$badge"
   done <<< "$sorted"
