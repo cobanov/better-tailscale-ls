@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.3.2"
+VERSION="0.3.3"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -167,13 +167,15 @@ render() {
 
   # Build rows separated by \x1f (Unit Separator, non-whitespace so bash
   # `read` won't collapse empty fields the way it does with tabs).
-  # Columns: online<US>hidden<US>name<US>ip<US>os<US>last<US>tag<US>caps
+  # Columns: online<US>hidden<US>name<US>ip<US>os<US>last<US>tag<US>caps<US>expired
   # `hidden` flags noise we suppress by default without dropping the row:
   # Mullvad-tagged exit nodes and ShareeNode entries (devices owned by
   # users we've shared a node *to* — Tailscale masks these behind the
   # placeholder hostname "device-of-shared-to-user"). "name" is the Tailscale
   # machine name (DNSName before first dot); falls back to HostName.
   # `caps` is a comma-separated list of capability flags: exit-opt, subnets.
+  # Peers with an expired node key count as offline regardless of .Online,
+  # which control keeps reporting as true for them.
   local US=$'\x1f'
   local rows
   rows=$(printf "%s" "$json" | jq -r --arg us "$US" '
@@ -183,8 +185,9 @@ render() {
     | ( (.Tags // []) | any(startswith("tag:mullvad")) ) as $is_mullvad
     | ( .ShareeNode // false ) as $is_sharee
     | ( .ID == ($self // "") ) as $is_self
+    | ( .Expired // false ) as $expired
     | [
-        (if .Online then "1" else "0" end),
+        (if .Online and ($expired | not) then "1" else "0" end),
         (if ($is_mullvad or $is_sharee) then "1" else "0" end),
         (if ($name // "") == "" then (.HostName // "?") else $name end),
         (.TailscaleIPs[0] // "-"),
@@ -197,7 +200,8 @@ render() {
         ([
           (if (.ExitNodeOption // false) and (.ExitNode // false | not) then "exit-opt" else empty end),
           (if ((.PrimaryRoutes // []) | length) > 0 then "subnets" else empty end)
-        ] | join(","))
+        ] | join(",")),
+        (if $expired then "1" else "0" end)
       ] | join($us)
   ' --arg self "$(printf "%s" "$json" | jq -r '.Self.ID')")
 
@@ -235,7 +239,7 @@ render() {
   local sorted
   sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k3,3)
 
-  while IFS="$US" read -r is_online is_hidden name ip os last tag caps; do
+  while IFS="$US" read -r is_online is_hidden name ip os last tag caps is_expired; do
     [[ -z "$name" ]] && continue
     if [[ "$SHOW_ALL" != 1 && "$is_hidden" == "1" ]]; then continue; fi
     if [[ "$ONLINE_ONLY" == 1 && "$is_online" != "1" ]]; then continue; fi
@@ -245,6 +249,9 @@ render() {
     if [[ "$is_online" == "1" ]]; then
       dot="${C_GREEN}●${C_RESET}"
       status_col="$C_GREEN"; status_txt="online"
+    elif [[ "$is_expired" == "1" ]]; then
+      dot="${C_RED}○${C_RESET}"
+      status_col="$C_RED"; status_txt="expired"
     else
       dot="${C_GREY}○${C_RESET}"
       status_col="$C_GREY"; status_txt="$(human_ago "$last") ago"
