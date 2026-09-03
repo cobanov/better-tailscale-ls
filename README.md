@@ -4,7 +4,7 @@ A nicer `tailscale status`. Colored, sorted, filterable, with online/offline
 counts and badges for `[self]`, `[active]`, and `[exit]` nodes.
 
 
-![](https://pbs.twimg.com/media/HIyNgb-a8AA09iG?format=jpg&name=medium)
+![tsls output](assets/tsls.png)
 
 ## Install
 
