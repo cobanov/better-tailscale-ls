@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.4.2"
+VERSION="0.4.3"
 REPO="cobanov/better-tailscale-ls"
 
 ONLINE_ONLY=0
@@ -22,8 +22,8 @@ WATCH_INTERVAL=5
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -o|--online)  ONLINE_ONLY=1; shift ;;
-    -f|--offline) OFFLINE_ONLY=1; shift ;;
+    -o|--online)  ONLINE_ONLY=1; OFFLINE_ONLY=0; shift ;;
+    -f|--offline) OFFLINE_ONLY=1; ONLINE_ONLY=0; shift ;;
     -a|--all)     SHOW_ALL=1; shift ;;
     -w|--watch)
       WATCH=1; shift
@@ -38,7 +38,7 @@ while [[ $# -gt 0 ]]; do
 done
 ACTION="${ACTION:-}"
 
-command -v tailscale >/dev/null || { echo "tailscale not found in PATH" >&2; exit 1; }
+[[ "$ACTION" == update ]] || command -v tailscale >/dev/null || { echo "tailscale not found in PATH" >&2; exit 1; }
 command -v jq >/dev/null || { echo "jq not found in PATH (brew install jq)" >&2; exit 1; }
 
 # ANSI helpers — balanced palette inspired by One Dark / Gruvbox
@@ -57,20 +57,10 @@ else
   C_BLUE=""; C_MAGENTA=""; C_CYAN=""; C_GREY=""; C_ORANGE=""
 fi
 
-os_color() {
-  case "$1" in
-    macOS|iOS)        printf "%s" "$C_CYAN" ;;
-    linux)            printf "%s" "$C_YELLOW" ;;
-    windows)          printf "%s" "$C_BLUE" ;;
-    android)          printf "%s" "$C_GREEN" ;;
-    tvOS|FreeBSD|*)   printf "%s" "$C_MAGENTA" ;;
-  esac
-}
-
 human_ago() {
-  # input: ISO timestamp or 0001-01-01T...; output: "5m", "3h", "2d"
+  # input: ISO timestamp (render handles the 0001-01-01 zero time);
+  # output: "5m", "3h", "2d"
   local ts="$1"
-  [[ "$ts" == 0001-01-01* || -z "$ts" ]] && { printf "now"; return; }
   local now epoch diff off=0
   now=$(date +%s)
   # Timestamps may carry a zone offset ("2026-06-12T15:11:05.2-07:00");
@@ -126,11 +116,10 @@ self_update() {
   # Resolve the latest release tag via the GitHub API. Release/tag URLs
   # are immutable, so raw.githubusercontent.com always serves them fresh
   # (unlike branch-based URLs, which the CDN caches aggressively).
-  # `|| true` keeps a no-match grep from tripping errexit before the
+  # `|| true` keeps a failed fetch from tripping errexit before the
   # empty-tag check below can print its message.
   tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep -m1 '"tag_name":' \
-        | sed -E 's/.*"tag_name"[^"]*"([^"]+)".*/\1/' || true)
+        | jq -r '.tag_name // empty' 2>/dev/null || true)
 
   if [[ -z "$tag" ]]; then
     printf "  %s✗%s could not determine latest release (no releases yet?)\n" \
@@ -140,7 +129,9 @@ self_update() {
 
   remote="${tag#v}"
 
-  if [[ "$remote" == "$VERSION" ]]; then
+  # A local copy ahead of the release (installed from main before the
+  # release went out) counts as latest, so -u never downgrades it.
+  if [[ "$(printf '%s\n' "$remote" "$VERSION" | sort -V | tail -1)" == "$VERSION" ]]; then
     printf "  %s✓%s already on the latest version (%s)\n\n" \
       "$C_GREEN" "$C_RESET" "$VERSION"
     exit 0
@@ -197,8 +188,9 @@ render() {
   # `hidden` flags noise we suppress by default without dropping the row:
   # Mullvad-tagged exit nodes and ShareeNode entries (devices owned by
   # users we've shared a node *to* — Tailscale masks these behind the
-  # placeholder hostname "device-of-shared-to-user"). "name" is the Tailscale
-  # machine name (DNSName before first dot); falls back to HostName.
+  # placeholder hostname "device-of-shared-to-user"), except the exit node
+  # in use, which always shows. "name" is the Tailscale machine name
+  # (DNSName before first dot); falls back to HostName, then "?".
   # `caps` is a comma-separated list of capability flags: exit-opt, subnets.
   # Peers with an expired node key count as offline regardless of .Online,
   # which control keeps reporting as true for them.
@@ -215,8 +207,11 @@ render() {
     | ( .Expired // false ) as $expired
     | [
         (if .Online and ($expired | not) then "1" else "0" end),
-        (if ($is_mullvad or $is_sharee) then "1" else "0" end),
-        (if ($name // "") == "" then (.HostName // "?") else $name end),
+        (if ($is_mullvad or $is_sharee) and (.ExitNode // false | not) then "1" else "0" end),
+        # `//` only replaces null/false, so empty strings need their own test.
+        (if ($name // "") != "" then $name
+         elif (.HostName // "") != "" then .HostName
+         else "?" end),
         (.TailscaleIPs[0] // "-"),
         (if (.OS // "") == "" then "-" else .OS end),
         (.LastSeen // "0001-01-01T00:00:00Z"),
@@ -261,16 +256,21 @@ render() {
   printf "   %sv%s%s\n" "$C_DIM" "$VERSION" "$C_RESET"
   head_plain+="   v${VERSION}"
 
-  # Column widths adapt to the rows that will actually print, so short
-  # names do not leave a wall of padding behind them. Same filters as
-  # the render loop below.
+  # The rows that will print, filtered once so the widths and the loop
+  # below agree. Sort: online (1) first, then OS so device types group
+  # together, then by name within each group.
+  local visible
+  visible=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k5,5f -k3,3f \
+    | awk -F"$US" -v all="$SHOW_ALL" -v on="$ONLINE_ONLY" -v off="$OFFLINE_ONLY" '
+      all != 1 && $2 == "1" { next }
+      on  == 1 && $1 != "1" { next }
+      off == 1 && $1 != "0" { next }
+      { print }')
+
+  # Column widths adapt to the visible rows, so short names do not
+  # leave a wall of padding behind them.
   local ipw namew osw
-  read -r ipw namew osw <<< "$(printf "%s\n" "$rows" | awk -F"$US" \
-    -v all="$SHOW_ALL" -v on="$ONLINE_ONLY" -v off="$OFFLINE_ONLY" '
-    $3 == "" { next }
-    all != 1 && $2 == "1" { next }
-    on  == 1 && $1 != "1" { next }
-    off == 1 && $1 != "0" { next }
+  read -r ipw namew osw <<< "$(printf "%s\n" "$visible" | awk -F"$US" '
     {
       if (length($4) > i) i = length($4)
       if (length($3) > n) n = length($3)
@@ -290,17 +290,10 @@ render() {
   rule=$(printf '─%.0s' $(seq 1 "$width"))
   printf "  %s%s%s\n" "$C_DIM" "$rule" "$C_RESET"
 
-  # Sort: online (1) first, then OS so device types group together,
-  # then by name within each group.
-  local sorted
-  sorted=$(printf "%s" "$rows" | LC_ALL=C sort -t"$US" -k1,1r -k5,5f -k3,3f)
-
   local prev_online=""
-  while IFS="$US" read -r is_online is_hidden name ip os last tag caps is_expired; do
+  while IFS="$US" read -r is_online _ name ip os last tag caps is_expired; do
+    # The here-string yields one empty line when nothing matched.
     [[ -z "$name" ]] && continue
-    if [[ "$SHOW_ALL" != 1 && "$is_hidden" == "1" ]]; then continue; fi
-    if [[ "$ONLINE_ONLY" == 1 && "$is_online" != "1" ]]; then continue; fi
-    if [[ "$OFFLINE_ONLY" == 1 && "$is_online" != "0" ]]; then continue; fi
 
     # Divider where the online group ends and the offline group begins.
     if [[ "$prev_online" == "1" && "$is_online" != "1" ]]; then
@@ -326,7 +319,13 @@ render() {
     fi
 
     local osc
-    osc=$(os_color "$os")
+    case "$os" in
+      macOS|iOS) osc="$C_CYAN" ;;
+      linux)     osc="$C_YELLOW" ;;
+      windows)   osc="$C_BLUE" ;;
+      android)   osc="$C_GREEN" ;;
+      *)         osc="$C_MAGENTA" ;;
+    esac
 
     local badge=""
     case "$tag" in
@@ -334,16 +333,8 @@ render() {
       exit)   badge=" ${C_ORANGE}[exit]${C_RESET}" ;;
       active) badge=" ${C_GREEN}[active]${C_RESET}" ;;
     esac
-    if [[ -n "$caps" ]]; then
-      local cap
-      while IFS= read -r cap; do
-        [[ -z "$cap" ]] && continue
-        case "$cap" in
-          exit-opt) badge+=" ${C_DIM}[exit?]${C_RESET}" ;;
-          subnets)  badge+=" ${C_BLUE}[subnets]${C_RESET}" ;;
-        esac
-      done < <(printf "%s\n" "$caps" | tr ',' '\n')
-    fi
+    [[ "$caps" == *exit-opt* ]] && badge+=" ${C_DIM}[exit?]${C_RESET}"
+    [[ "$caps" == *subnets* ]]  && badge+=" ${C_BLUE}[subnets]${C_RESET}"
 
     # Measured-width ip, name, os columns, then status and badges.
     printf "  %s  %s%-*s%s  %s%-*s%s  %s%-*s%s  %s%s%s%s\n" \
@@ -353,7 +344,7 @@ render() {
       "$osc"    "$osw"   "$os"   "$C_RESET" \
       "$status_col" "$status_txt" "$C_RESET" \
       "$badge"
-  done <<< "$sorted"
+  done <<< "$visible"
 
   printf "\n"
 }

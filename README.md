@@ -21,14 +21,15 @@ curl -fsSL https://raw.githubusercontent.com/cobanov/better-tailscale-ls/main/ts
   -o ~/.local/bin/tsls && chmod +x ~/.local/bin/tsls
 ```
 
-The installer drops `tsls` into `~/.local/bin` (or `/usr/local/bin` if that
-isn't on your PATH). Override with `PREFIX=/some/dir`.
+The installer drops `tsls` into `~/.local/bin` (or `/usr/local/bin` when
+`~/.local/bin` neither exists nor is on your PATH). Override with
+`PREFIX=/some/dir`.
 
 ### Dependencies
 
 - [`tailscale`](https://tailscale.com/download) CLI
 - [`jq`](https://jqlang.github.io/jq/)
-- `bash` 4+ (macOS ships 3.2; the script still works there)
+- `bash` (the 3.2 that ships with macOS is fine)
 
 On macOS:
 
@@ -54,7 +55,8 @@ If you're connected to Mullvad through Tailscale, the ~70 exit nodes
 (`us-sea-wg-001`, `de-fra-wg-302`, ...) would otherwise drown out your
 own devices. They're hidden by default, together with shared-in
 (sharee) placeholder entries, and counted in the header (`78 hidden`);
-use `-a` / `--all` to see them.
+use `-a` / `--all` to see them. The exit node you're routing through
+always shows, with its `[exit]` badge.
 
 The current version is shown dim in the header so you always know what
 you're running, and `tsls -u` pulls the newest tagged release over
@@ -74,6 +76,11 @@ OS gets a color so you can scan the list quickly: macOS/iOS cyan, linux yellow,
 windows blue, android green, everything else magenta. Online dots are green,
 offline dots dim. Devices whose node key has expired count as offline and
 show a rose `expired` status until they re-authenticate.
+
+## Development
+
+`./test.sh` runs `tsls` against a fixture through a fake `tailscale`, so
+no tailnet is needed.
 
 ## Uninstall
 
